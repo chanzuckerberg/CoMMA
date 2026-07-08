@@ -10,6 +10,7 @@ OTel support is configured via environment variables.
 | :--- | :--- | :--- | :--- |
 | `NCCL_PROFILER_OTEL_ENABLE` | Boolean | `false` | Enables OpenTelemetry support. |
 | `NCCL_PROFILER_OTEL_TRACE_NCCLOP` | Boolean | `false` | (Experimental) Enables tracing for NCCL operations. Requires `NCCL_PROFILER_OTEL_ENABLE` to be `true`. |
+| `NCCL_PROFILER_OTEL_KERNEL_DURATION` | Boolean | `false` | Emits the `nccl.kernel.duration` histogram (true on-device kernel/wire duration from the KernelCh GPU globaltimer). Requires `NCCL_PROFILER_OTEL_ENABLE`; forces `NCCL_PROFILER_TRACK_KERNEL_CH` on. |
 | `NCCL_PROFILER_OTEL_METRICS_MAX_CARDINALITY` | Integer | `0` | Maximum number of unique metric streams (cardinality limit) for high-fidelity tracking. If set to `0`, all metrics use low-fidelity aggregation. |
 | `NCCL_PROFILER_OTEL_METRICS_CARDINALITY_GROUPING_INTERVAL` | Duration | `3600s` | Interval at which CoMMA updates the priority ("Top K") of metrics for cardinality management. |
 | `NCCL_PROFILER_OTEL_LATENCY_HISTOGRAM_MAX_SIZE` | Integer | `160` | Maximum size parameter for OTel Base2 Exponential Histogram. |
@@ -93,6 +94,22 @@ Caveats — what counts as activity depends on the tracking configuration:
 - Point-to-point operations not selected by sampling (`NCCL_PROFILER_P2P_SAMPLE_RATE`, `NCCL_PROFILER_P2P_RECV_SAMPLE_RATE`) produce no activity window at all, so their entire enqueue and transfer time is reported as gap. With the default recv sample rate of `0.1`, 90% of receive transfers count as idle time; set the sample rates to `1.0` before interpreting gap totals for p2p-heavy workloads such as pipeline parallelism.
 - Sub-microsecond gaps can appear between an operation's enqueue window and the start of its proxy activity; they land in the lowest buckets and carry negligible weight in gap-time totals.
 - If NCCL aborts a plan launch on an error path it may never stop the events it started; the in-flight count then stays above zero and the metric reports no further gaps for the process lifetime. CoMMA logs a one-time warning when it detects a stuck in-flight count. This only occurs after NCCL errors, which the job surfaces on its own.
+
+### `nccl.kernel.duration` (Histogram, Unit: `ns`)
+
+Opt-in via `NCCL_PROFILER_OTEL_KERNEL_DURATION=true`. Records the true on-device duration of each operation's GPU work: NCCL stamps kernel channel events with the GPU globaltimer (the v4 profiler interface's `kernelCh.pTimer` carries the start timestamp in the event descriptor and the stop timestamp in the `KernelChStop` state); CoMMA folds the earliest start / latest stop across the operation's kernel channels and records the difference on completion.
+
+Unlike `nccl.collective.duration` (a host-side envelope that includes launch and enqueue effects), this is device-clock time, so:
+- `busbw = size × correction_factor(op, nranks) / kernel_duration` gives true bus bandwidth per operation, comparable against hardware line rate without a peer cohort.
+- `collective.duration − kernel.duration` approximates the host-side (launch/enqueue) component per operation — durations are comparable across the two clock domains even though absolute timestamps are not.
+
+Attributes (same keying and cardinality governance as `nccl.collective.duration`):
+- `nccl.comm.hash`, `nccl.collective.name`, `nccl.size.class`, `nccl.rank`, `nccl.hostname`.
+
+Caveats:
+- Requires the v4+ profiler interface; on older NCCL versions `pTimer` is absent and the metric records nothing.
+- Kernel channel tracking (forced on by the opt-in) adds the KernelCh event overhead; the fold itself is two comparisons on the existing off-thread path.
+- Operations whose kernels never report a stop timestamp (e.g. reclaimed/hung ops) record nothing — absence of samples while `collective.seq_num` advances is itself a signal.
 
 ### `nccl.collective.seq_num` (Gauge)
 

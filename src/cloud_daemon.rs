@@ -390,6 +390,20 @@ async fn exporter(
             None
         };
 
+    // True on-device kernel duration (KernelCh pTimer fold). Opt-in via
+    // NCCL_PROFILER_OTEL_KERNEL_DURATION (which forces track_kernel_ch on);
+    // same keying/cardinality governance as nccl.collective.duration.
+    let mut otel_kernel_duration_histogram: Option<otel_utils::DurationHistogram> =
+        if profiler.config.otel_enable && profiler.config.otel_kernel_duration {
+            Some(otel_utils::DurationHistogram::new(
+                "nccl.kernel.duration",
+                "ns",
+                profiler.config.otel_metrics_max_cardinality,
+            ))
+        } else {
+            None
+        };
+
     let mut summary_interval = tokio::time::interval(profiler.config.summary_interval);
 
     // the very first tick completes immediately
@@ -466,6 +480,18 @@ async fn exporter(
                             match &telemetry {
                                 Telemetry::NcclOp(op) => {
                                     let _ = otel_utils::record_ncclop_duration(histogram, profiler, op);
+                                }
+                                Telemetry::CommClose(comm_hash) => {
+                                    histogram.close_comm(*comm_hash);
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if let Some(histogram) = otel_kernel_duration_histogram.as_mut() {
+                            match &telemetry {
+                                Telemetry::NcclOp(op) => {
+                                    let _ = otel_utils::record_ncclop_kernel_duration(histogram, op);
                                 }
                                 Telemetry::CommClose(comm_hash) => {
                                     histogram.close_comm(*comm_hash);

@@ -129,6 +129,11 @@ pub struct NcclOp {
     id: usize,
     is_p2p: bool,
     child_start_time: Option<Instant>,
+    // GPU globaltimer (ns) bounds across this op's kernel channels: min start
+    // / max stop, from the KernelCh pTimer. Their difference is the true
+    // on-device kernel/wire duration. None when pTimer is absent (pre-v4).
+    gpu_clk_start: Option<u64>,
+    gpu_clk_end: Option<u64>,
     comm_hash: Option<u64>, // starting from v4 comm_hash is no longer part of the event descriptor
     descr: nccl_metadata::EventMetadata,
     proxyops: Option<Vec<ProxyOp>>,
@@ -262,6 +267,8 @@ impl NcclOp {
             is_p2p,
             id,
             child_start_time: None,
+            gpu_clk_start: None,
+            gpu_clk_end: None,
             comm_hash: comm_hash_override,
             descr: descr.clone_to_metadata(),
             proxyops: None,
@@ -303,6 +310,31 @@ impl NcclOp {
         let et = self.basic_info().end_time()?;
         let st = self.child_start_time?;
         Some(et - st)
+    }
+
+    /// Fold a kernel channel's GPU globaltimer start/stop into this op's
+    /// bounds: earliest start / latest stop across channels. Zeros (pTimer
+    /// unavailable) are ignored.
+    pub fn update_gpu_clk(&mut self, start: u64, stop: u64) {
+        if start > 0 {
+            self.gpu_clk_start = Some(match self.gpu_clk_start {
+                Some(s) => s.min(start),
+                None => start,
+            });
+        }
+        if stop > 0 {
+            self.gpu_clk_end = Some(match self.gpu_clk_end {
+                Some(e) => e.max(stop),
+                None => stop,
+            });
+        }
+    }
+
+    /// True on-device kernel/wire duration in nanoseconds (the NVIDIA
+    /// globaltimer is ns-resolution), or None when KernelCh pTimer was
+    /// unavailable. checked_sub guards a stop that never arrived.
+    pub fn gpu_kernel_duration_ns(&self) -> Option<u64> {
+        self.gpu_clk_end?.checked_sub(self.gpu_clk_start?)
     }
 
     pub fn comm_hash(&self) -> u64 {

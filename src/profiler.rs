@@ -352,6 +352,10 @@ impl Communicator {
 #[repr(align(16))]
 pub struct KernelCh {
     pub parent_op: Option<usize>,
+    // GPU globaltimer (ns) at kernel start (from the event descriptor at
+    // startEvent) and stop (filled from the KernelChStop state). 0 = absent.
+    pub start_gpu_clk: u64,
+    pub stop_gpu_clk: u64,
 }
 
 #[derive(Debug)]
@@ -703,6 +707,8 @@ where
                             .alloc_new(
                                 KernelCh {
                                     parent_op: Some(ncclop),
+                                    start_gpu_clk: descr.kernel_ch_p_timer(),
+                                    stop_gpu_clk: 0,
                                 },
                                 None,
                                 true,
@@ -848,6 +854,8 @@ pub fn stop_event_handler(event: event::Event) -> NcclResult<()> {
                             start_time,
                             start_time.elapsed().as_nanos() as u64,
                             ncclop,
+                            kernelch.start_gpu_clk,
+                            kernelch.stop_gpu_clk,
                         );
                         thread_state.send_to_daemon(msg, true);
                     }
@@ -867,6 +875,16 @@ pub fn stop_event_handler(event: event::Event) -> NcclResult<()> {
         }
     });
     Ok(())
+}
+
+/// Record the KernelChStop GPU globaltimer onto a live KernelCh event.
+/// Called from the v4 recordEventState dispatch; pairs with the start clock
+/// captured at startEvent so the daemon can fold the on-device duration onto
+/// the parent op.
+pub fn record_kernelch_stop(event: &mut event::Event, stop_gpu_clk: u64) {
+    if let event::Event::KernelCh(kernelch) = event {
+        kernelch.stop_gpu_clk = stop_gpu_clk;
+    }
 }
 
 pub fn record_event_state_handler<S>(

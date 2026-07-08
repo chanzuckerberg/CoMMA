@@ -362,6 +362,22 @@ unsafe extern "C" fn profiler_record_event_state_v4(
             }
         }
 
+        event_ffi::Type::KernelCh => {
+            // The kernel's GPU stop-timestamp arrives at KernelChStop; pair it
+            // with the start pTimer captured at startEvent so the daemon can
+            // fold the true on-device duration onto the parent collective.
+            if e_state as u32 == profiler_shim::proxy_event_state::v4::KERNEL_CH_STOP {
+                if let Some(mut event) = event::Event::from_ffi(e_handle) {
+                    // SAFETY: handle is KernelCh-typed and the state is
+                    // KernelChStop, so the kernelCh arm of the v4 state-args
+                    // union is the live one.
+                    let stop_gpu_clk = unsafe { (*e_state_args).kernelCh.pTimer };
+                    profiler::record_kernelch_stop(&mut event, stop_gpu_clk);
+                    let _ = event::Event::into_ffi(event);
+                }
+            }
+        }
+
         _ => (),
     }
     profiler_shim::ncclResult_t_ncclSuccess

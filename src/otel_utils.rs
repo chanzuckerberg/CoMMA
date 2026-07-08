@@ -45,6 +45,7 @@ pub fn init_meter_provider(config: &config::Config) -> Option<()> {
         "*latency",
         "nccl.collective.duration",
         "nccl.collective.gap",
+        "nccl.kernel.duration",
     ] {
         let mut histogram_instrument = Instrument::new().name(name);
         histogram_instrument.kind = Some(InstrumentKind::Histogram);
@@ -429,6 +430,40 @@ pub fn record_ncclop_duration(
     };
     histogram.record(
         duration.as_nanos() as _,
+        op.comm_hash(),
+        name,
+        op.basic_info().rank(),
+        op.byte_count(),
+    );
+    Some(())
+}
+
+/// Record the true on-device kernel/wire duration of a completed op into a
+/// `nccl.kernel.duration` histogram (same {comm, name, size.class, rank}
+/// keying as nccl.collective.duration). The value is the fold of the op's
+/// kernel channels' GPU globaltimer bounds (KernelCh pTimer, v4+), so a
+/// consumer can compute true busbw = size * correction(op, nranks) /
+/// kernel_time and, against nccl.collective.duration, split host-side from
+/// device-side time. No-op when pTimer was unavailable.
+pub fn record_ncclop_kernel_duration(
+    histogram: &mut DurationHistogram,
+    op: &event::NcclOp,
+) -> Option<()> {
+    let dur_ns = op.gpu_kernel_duration_ns()?;
+    let descr = op.get_descr();
+    let name = if let Some(coll) = descr.try_cast_to_coll() {
+        ncclop_otel_name(coll.op_type())
+    } else if let Some(p2p) = descr.try_cast_to_p2p() {
+        if p2p.is_send() {
+            "ncclSend"
+        } else {
+            "ncclRecv"
+        }
+    } else {
+        return None;
+    };
+    histogram.record(
+        dur_ns,
         op.comm_hash(),
         name,
         op.basic_info().rank(),
