@@ -605,6 +605,15 @@ pub trait Version: Event {
 
     fn version() -> profiler::Version;
 
+    /// GPU globaltimer (ns) stamped by NCCL on a KernelCh event descriptor
+    /// (its START timestamp). Present on v4+ descriptors; 0 on versions
+    /// without kernel-channel pTimer support. Only meaningful for
+    /// `type_() == ncclProfileKernelCh` descriptors.
+    #[inline(always)]
+    fn kernel_ch_p_timer(&self) -> u64 {
+        0
+    }
+
     /// # Safety
     ///
     /// type of this descriptor must be collective
@@ -1160,6 +1169,14 @@ impl Version for profiler_shim::EventDescrV4 {
 
     fn version() -> profiler::Version {
         profiler::Version::V4
+    }
+
+    #[inline(always)]
+    fn kernel_ch_p_timer(&self) -> u64 {
+        // SAFETY: only read for KernelCh-typed descriptors (the caller
+        // dispatches on type_ == ncclProfileKernelCh), so the kernelCh
+        // union arm is the live one.
+        unsafe { self.0.__bindgen_anon_1.kernelCh.pTimer }
     }
 }
 

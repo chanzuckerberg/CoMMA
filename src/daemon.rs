@@ -140,6 +140,8 @@ pub enum Message {
         /* start time */ Instant,
         /* duration ns */ u64,
         /* parent handle */ usize,
+        /* start gpu clk (ns) */ u64,
+        /* stop gpu clk (ns) */ u64,
     ),
     CommOpen(Communicator),
     CommClose(/* comm_hash = */ u64),
@@ -540,13 +542,14 @@ impl<'a> PollingContext<'a> {
                         .try_publish(&self.profiler.free_step_batch);
                 }
             }
-            Message::KernelCh(start_time, duration, parent) => {
+            Message::KernelCh(start_time, duration, parent, start_gpu_clk, stop_gpu_clk) => {
                 if let Some(ncclop) = self.get_ncclop(parent) {
                     ncclop_update(
                         ncclop,
                         start_time,
                         Some(start_time + Duration::from_nanos(duration)),
                     );
+                    ncclop.update_gpu_clk(start_gpu_clk, stop_gpu_clk);
                 }
             }
             Message::CommOpen(comm) => {
