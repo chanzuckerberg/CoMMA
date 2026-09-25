@@ -102,6 +102,11 @@ pub struct Config {
     // OpenTelemetry config
     pub otel_enable: bool,
     pub otel_trace_ncclop: bool,
+    // Emit the per-collective GPU kernel duration histogram
+    // (nccl.kernel.duration, from the KernelCh pTimer GPU globaltimer) so a
+    // consumer can compute true busbw = size * correction(op, nranks) /
+    // kernel_time. Opt-in; forces track_kernel_ch on.
+    pub otel_kernel_duration: bool,
     // opentelemetry base2 histogram parameters
     // see https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#base2-exponential-bucket-histogram-aggregation
     // for more detail
@@ -173,6 +178,12 @@ impl Config {
 
         field_from_env!(s, otel_enable, false);
         field_from_env!(s, otel_trace_ncclop, false);
+        field_from_env!(s, otel_kernel_duration, false);
+        // Kernel duration is measured from the KernelCh pTimer (GPU
+        // globaltimer); ensure kernel-channel tracking is on when opted in.
+        if s.otel_kernel_duration {
+            s.track_kernel_ch = true;
+        }
         field_from_env!(s, otel_metrics_max_cardinality, 0);
         field_from_env!(
             s,
