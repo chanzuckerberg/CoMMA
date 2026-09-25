@@ -452,6 +452,15 @@ pub fn init_handler(
     Ok(Box::new(Communicator::new()))
 }
 
+/// Label the process-wide gap metric with this process's rank in the
+/// largest communicator it initializes (the world comm in practice). No-op
+/// when OTel is off (no gap tracker) or the comm is not the largest so far.
+pub fn stamp_gap_rank(profiler: &Profiler, rank: i32, nranks: i32) {
+    if let Some(gap_tracker) = profiler.gap_tracker.as_ref() {
+        gap_tracker.set_rank(rank, nranks);
+    }
+}
+
 pub fn init_handler_v4(
     e_activation_mask: &mut i32,
     _comm_name: *const libc::c_char,
@@ -471,10 +480,8 @@ pub fn init_handler_v4(
             PROFILER.get().unwrap().spawn_daemon();
         }
         *lg += 1;
-        // label the process-wide gap metric with this process's rank in the
-        // largest communicator it initializes (the world comm in practice)
-        if let Some(gap_tracker) = PROFILER.get().and_then(|p| p.gap_tracker.as_ref()) {
-            gap_tracker.set_rank(rank, n_ranks);
+        if let Some(profiler) = PROFILER.get() {
+            stamp_gap_rank(profiler, rank, n_ranks);
         }
 
         mask |= profiler_shim::ncclProfileGroup;

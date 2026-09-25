@@ -84,7 +84,7 @@ This metric records the duration of intervals where the process has no NCCL acti
 Attributes:
 - `nccl.hostname`: Hostname of the node.
 - `nccl.pid`: Process id. Together with the hostname this identifies the process; a comm-local rank would be ambiguous for a metric that spans communicators.
-- `nccl.rank`: The process's rank in the LARGEST communicator it has initialized (the world communicator on ordinary jobs), stamped from the v4 profiler `init` callback. Sub-communicators opened later never relabel the process. Absent on v1-v3 profiler interfaces (their `init` carries no rank) and on gaps recorded before the first communicator init. This is what lets a consumer join gap to the per-rank families without a pid-to-rank mapping.
+- `nccl.rank`: The process's rank in the LARGEST communicator it has initialized (the world communicator on ordinary jobs), stamped from the v4 profiler `init` callback. Sub-communicators opened later never relabel the process; a LARGER communicator opened later does, and its gaps then land on a new attribute set (a new series downstream). Absent on v1-v3 profiler interfaces (their `init` carries no rank) and on gaps recorded before the first communicator init. This is what lets a consumer join gap to the per-rank families without a pid-to-rank mapping.
 
 The gap is a per-process property by definition, so it deliberately carries no communicator dimension.
 

@@ -552,7 +552,13 @@ impl GapTracker {
     /// Must be called after the meter provider is installed; before that,
     /// activity_begin / activity_end only maintain the in-flight count.
     pub fn init_instrument(&self) {
-        let meter = opentelemetry::global::meter("CoMMA");
+        self.init_instrument_with(&opentelemetry::global::meter("CoMMA"));
+    }
+
+    /// Same as init_instrument but on an explicit meter, so a test can
+    /// drive the tracker through a private provider and read back the
+    /// exported datapoints.
+    pub fn init_instrument_with(&self, meter: &opentelemetry::metrics::Meter) {
         let _ = self.histogram.get_or_init(|| {
             meter
                 .u64_histogram("nccl.collective.gap")
@@ -1028,6 +1034,97 @@ mod tests {
         let attrs = tracker.attributes();
         assert_eq!(attrs.len(), 3);
         assert_eq!(attrs[2].value.to_string(), "11");
+    }
+
+    /// Simulation of the export path: a private meter provider with a
+    /// manual reader stands in for the OTLP exporter, the tracker is driven
+    /// through init, rank stamp and idle -> active transitions, and the
+    /// collected datapoints are inspected the way the collector would see
+    /// them: one series per attribute set, `nccl.rank` present on each.
+    #[test]
+    fn gap_rank_attribute_reaches_exported_datapoints() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{Histogram, ResourceMetrics};
+        use opentelemetry_sdk::metrics::reader::MetricReader;
+        use opentelemetry_sdk::metrics::{
+            InstrumentKind, ManualReader, MetricResult, Pipeline, SdkMeterProvider, Temporality,
+        };
+        use std::sync::Weak;
+
+        // ManualReader is not Clone; share one behind an Arc so the test can
+        // collect after handing the reader to the provider.
+        #[derive(Debug, Clone)]
+        struct SharedReader(Arc<ManualReader>);
+        impl MetricReader for SharedReader {
+            fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+                self.0.register_pipeline(pipeline)
+            }
+            fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+                self.0.collect(rm)
+            }
+            fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+                self.0.force_flush()
+            }
+            fn shutdown(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+                self.0.shutdown()
+            }
+            fn temporality(&self, kind: InstrumentKind) -> Temporality {
+                self.0.temporality(kind)
+            }
+        }
+
+        let reader = SharedReader(Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let tracker = GapTracker::new();
+        tracker.init_instrument_with(&provider.meter("CoMMA"));
+
+        // world comm init (rank 3 of 8), then one idle interval of 300 ns
+        tracker.set_rank(3, 8);
+        assert_eq!(tracker.begin_transition(|| 100), None);
+        tracker.activity_end(200);
+        tracker.activity_begin(|| 500);
+        // a larger comm re-stamps (rank 11 of 16): the next gap lands on a
+        // NEW attribute set, i.e. a new series downstream
+        tracker.set_rank(11, 16);
+        tracker.activity_end(600);
+        tracker.activity_begin(|| 900);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::builder_empty().build(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm).unwrap();
+        let metric = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| s.metrics.iter())
+            .find(|m| m.name == "nccl.collective.gap")
+            .expect("gap histogram exported");
+        assert_eq!(metric.unit, "ns");
+        let hist = metric
+            .data
+            .as_any()
+            .downcast_ref::<Histogram<u64>>()
+            .expect("u64 histogram aggregation");
+        let mut by_rank = std::collections::HashMap::new();
+        for dp in &hist.data_points {
+            let keys: Vec<&str> = dp.attributes.iter().map(|kv| kv.key.as_str()).collect();
+            assert!(keys.contains(&"nccl.hostname"), "{keys:?}");
+            assert!(keys.contains(&"nccl.pid"), "{keys:?}");
+            let rank = dp
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == "nccl.rank")
+                .expect("nccl.rank on every exported gap datapoint")
+                .value
+                .to_string();
+            by_rank.insert(rank, (dp.count, dp.sum));
+        }
+        assert_eq!(by_rank.get("3"), Some(&(1, 300)));
+        assert_eq!(by_rank.get("11"), Some(&(1, 300)));
+        assert_eq!(by_rank.len(), 2);
     }
 
     #[test]

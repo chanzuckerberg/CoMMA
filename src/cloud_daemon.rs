@@ -792,6 +792,22 @@ mod tests {
     }
 
     #[test]
+    fn gap_rank_stamp_wiring() {
+        // the init-callback helper stamps the rank only when a gap tracker
+        // exists, and hands set_rank the (rank, nranks) pair unchanged
+        let mut profiler = Profiler::new(Version::V2);
+        crate::profiler::stamp_gap_rank(&profiler, 5, 64); // OTel off: no tracker, no panic
+        profiler.gap_tracker = Some(otel_utils::GapTracker::new());
+        crate::profiler::stamp_gap_rank(&profiler, 5, 64);
+        let attrs = profiler.gap_tracker.as_ref().unwrap().attributes();
+        let rank = attrs
+            .iter()
+            .find(|kv| kv.key.as_str() == "nccl.rank")
+            .unwrap();
+        assert_eq!(rank.value.to_string(), "5");
+    }
+
+    #[test]
     fn otel_gap_spans_op_execution() {
         use crate::event_ffi::AsFFI as _;
         use crate::profiler::THREAD_STATE;
