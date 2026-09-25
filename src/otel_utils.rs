@@ -22,7 +22,7 @@ use opentelemetry_sdk::Resource;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 
 pub static RESOURCE: LazyLock<Resource> =
@@ -495,7 +495,13 @@ pub struct GapTracker {
     last_state: AtomicU64,
     stall_logged: AtomicBool,
     histogram: OnceLock<OtelHistogram<u64>>,
-    attributes: [KeyValue; 2],
+    // (size of the largest communicator stamped so far, -1 = none yet;
+    // hostname + pid, plus `nccl.rank` once stamped). One lock holds both
+    // so the compare-and-stamp in set_rank is atomic across concurrent
+    // communicator inits. Written only on communicator init, read once per
+    // idle -> active transition: an uncontended read lock is the whole
+    // hot-path cost, the counters above stay lock-free.
+    attributes: RwLock<(i32, Vec<KeyValue>)>,
 }
 
 impl GapTracker {
@@ -507,14 +513,40 @@ impl GapTracker {
             stall_logged: AtomicBool::new(false),
             histogram: OnceLock::new(),
             // the gap is process-wide (activity windows span communicators
-            // and threads), so it is labeled with a process-stable identity
-            // rather than a comm-local rank
-            attributes: [
-                KeyValue::new("nccl.hostname", get_hostname_libc().unwrap_or_default()),
-                // SAFETY: `getpid()` takes no input and does not modify rust-managed state
-                KeyValue::new("nccl.pid", unsafe { libc::getpid() } as i64),
-            ],
+            // and threads), so it is labeled with a process-stable identity;
+            // the rank of the largest communicator is added by set_rank so
+            // consumers can join it to the per-rank families
+            attributes: RwLock::new((
+                -1,
+                vec![
+                    KeyValue::new("nccl.hostname", get_hostname_libc().unwrap_or_default()),
+                    // SAFETY: `getpid()` takes no input and does not modify rust-managed state
+                    KeyValue::new("nccl.pid", unsafe { libc::getpid() } as i64),
+                ],
+            )),
         }
+    }
+
+    /// Stamp `nccl.rank` from a communicator init. Only the LARGEST
+    /// communicator seen wins (the world communicator on ordinary jobs), so
+    /// sub-communicators opened later never relabel the process. No-op for
+    /// a communicator no larger than the one already stamped.
+    pub fn set_rank(&self, rank: i32, nranks: i32) {
+        // compare and stamp under the same write lock: two communicators of
+        // different sizes initializing concurrently cannot leave the
+        // smaller one's rank behind
+        let mut guard = self.attributes.write().unwrap();
+        if nranks <= guard.0 {
+            return;
+        }
+        guard.0 = nranks;
+        guard.1.retain(|kv| kv.key.as_str() != "nccl.rank");
+        guard.1.push(KeyValue::new("nccl.rank", rank as i64));
+    }
+
+    /// Current attribute set (hostname, pid and, once stamped, rank).
+    pub fn attributes(&self) -> Vec<KeyValue> {
+        self.attributes.read().unwrap().1.clone()
     }
 
     /// Must be called after the meter provider is installed; before that,
@@ -539,7 +571,7 @@ impl GapTracker {
         let Some(histogram) = self.histogram.get() else {
             return;
         };
-        histogram.record(gap_ns, &self.attributes);
+        histogram.record(gap_ns, &self.attributes.read().unwrap().1);
     }
 
     pub fn activity_end(&self, now_ns: u64) {
@@ -968,6 +1000,34 @@ mod tests {
 
         // a gap can never be negative
         assert_eq!(tracker.begin_transition(|| 1050), Some(0));
+    }
+
+    #[test]
+    fn gap_tracker_rank_attribute_tracks_largest_comm() {
+        let tracker = GapTracker::new();
+        let names = |t: &GapTracker| {
+            t.attributes()
+                .iter()
+                .map(|kv| kv.key.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&tracker), ["nccl.hostname", "nccl.pid"]);
+
+        // first communicator stamps its rank
+        tracker.set_rank(3, 8);
+        let attrs = tracker.attributes();
+        assert_eq!(names(&tracker), ["nccl.hostname", "nccl.pid", "nccl.rank"]);
+        assert_eq!(attrs[2].value.to_string(), "3");
+
+        // a smaller (sub-)communicator never relabels the process
+        tracker.set_rank(0, 4);
+        assert_eq!(tracker.attributes()[2].value.to_string(), "3");
+
+        // a larger one does, and there is still exactly one rank attribute
+        tracker.set_rank(11, 16);
+        let attrs = tracker.attributes();
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs[2].value.to_string(), "11");
     }
 
     #[test]

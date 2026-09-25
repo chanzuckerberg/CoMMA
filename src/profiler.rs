@@ -457,8 +457,8 @@ pub fn init_handler_v4(
     _comm_name: *const libc::c_char,
     comm_hash: u64,
     _n_nodes: i32,
-    _n_ranks: i32,
-    _rank: i32,
+    n_ranks: i32,
+    rank: i32,
     version: Version,
 ) -> NcclResult<Box<Communicator>> {
     let mut mask = 0;
@@ -471,6 +471,11 @@ pub fn init_handler_v4(
             PROFILER.get().unwrap().spawn_daemon();
         }
         *lg += 1;
+        // label the process-wide gap metric with this process's rank in the
+        // largest communicator it initializes (the world comm in practice)
+        if let Some(gap_tracker) = PROFILER.get().and_then(|p| p.gap_tracker.as_ref()) {
+            gap_tracker.set_rank(rank, n_ranks);
+        }
 
         mask |= profiler_shim::ncclProfileGroup;
         mask |= profiler_shim::ncclProfileColl;
